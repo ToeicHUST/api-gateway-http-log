@@ -1,0 +1,14 @@
+# #!/usr/bin/env sh
+# . "$(dirname -- "$0")/_/husky.sh"
+
+
+# echo "🎨 Running lint-staged on changed files..."
+
+# npx lint-staged
+
+# if [ $? -eq 0 ]; then
+#   echo "✅ Code formatting and linting passed!"
+# else
+#   echo "❌ Lint-staged failed! Please fix the issues above."
+#   exit 1
+# fi

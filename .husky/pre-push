@@ -1,0 +1,43 @@
+# #!/usr/bin/env sh
+# . "$(dirname -- "$0")/_/husky.sh"
+
+# echo "🔍 Checking code quality before push..."
+# echo ""
+
+
+
+
+# npx prettier --write "src/**/*.ts"
+# npx prettier --write "./**/*.ts"
+
+
+
+
+# # 1. Build project
+# echo "🏗️  Building project..."
+# npm run build || {
+#   echo ""
+#   echo "❌ Build failed. Please fix build errors before pushing."
+#   echo "💡 Run 'npm run build' locally to see the errors."
+#   exit 1
+# }
+
+# # 2. Run Unit Tests (Coverage)
+# echo "🧪 Running unit tests (coverage)..."
+# npm run test:cov || {
+#   echo ""
+#   echo "❌ Unit tests failed."
+#   exit 1
+# }
+
+# # 3. Run E2E Tests
+# echo "🤖 Running E2E tests..."
+# npm run test:e2e || {
+#   echo ""
+#   echo "❌ E2E tests failed."
+#   exit 1
+# }
+
+# echo ""
+# echo "✅ All checks passed! Proceeding with push..."
+# echo ""

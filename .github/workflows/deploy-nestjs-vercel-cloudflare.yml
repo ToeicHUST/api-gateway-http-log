@@ -1,0 +1,146 @@
+name: Deploy to Vercel + Cloudflare DNS
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Check NestJS Project (nest-cli.json)
+        run: |
+          if [ ! -f "nest-cli.json" ]; then
+            echo "⛔️ KHÔNG TÌM THẤY file nest-cli.json!"
+            echo "Workflow sẽ dừng lại tại đây vì đây không phải là dự án NestJS hợp lệ hoặc sai cấu trúc."
+            exit 1
+          fi
+          echo "✅ Đã tìm thấy nest-cli.json. Tiếp tục deploy..."
+
+      - name: Import Secrets from Vault
+        uses: hashicorp/vault-action@v3
+        with:
+          url: ${{ secrets.VAULT_ADDR }}
+          method: approle
+          roleId: ${{ secrets.VAULT_ROLE_ID_PROD }}
+          secretId: ${{ secrets.VAULT_SECRET_ID_PROD }}
+          secrets: |
+            ${{ secrets.VAULT_DATA_PATH_PROD }} DOMAIN | DOMAIN ;
+            ${{ secrets.VAULT_DATA_PATH_PROD }} CODECOV_TOKEN | CODECOV_TOKEN ;
+            ${{ secrets.VAULT_DATA_PATH_PROD }} VERCEL_TOKEN | VERCEL_TOKEN ;
+            ${{ secrets.VAULT_DATA_PATH_PROD }} VERCEL_CNAME | VERCEL_CNAME ;
+            ${{ secrets.VAULT_DATA_PATH_PROD }} CLOUDFLARE_API_TOKEN | CLOUDFLARE_API_TOKEN ;
+            ${{ secrets.VAULT_DATA_PATH_PROD }} CLOUDFLARE_ZONE_ID | CLOUDFLARE_ZONE_ID ;
+            ${{ secrets.VAULT_DATA_PATH_PROD }} TELEGRAM_BOT_TOKEN | TELEGRAM_BOT_TOKEN ;
+            ${{ secrets.VAULT_DATA_PATH_PROD }} TELEGRAM_CHAT_ID | TELEGRAM_CHAT_ID ;
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '25'
+          cache: 'npm'
+
+      - name: Install & Build
+        run: |
+          npm ci
+          npm run build --if-present
+
+      - name: Test Coverage
+        run: |
+          npm run test:cov
+
+      - name: Test E2E
+        run: |
+          npm run test:e2e
+
+      - name: Upload to Codecov
+        uses: codecov/codecov-action@v5
+        with:
+          token: ${{ env.CODECOV_TOKEN }}
+          directory: ./coverage
+          fail_ci_if_error: true
+
+      - name: Generate Domain Metadata
+        id: meta
+        run: |
+          REPO_NAME_LOW=$(echo "${{ github.event.repository.name }}" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9-]/-/g')
+          echo "full_domain=${REPO_NAME_LOW}.${{ env.DOMAIN }}" >> $GITHUB_OUTPUT
+          echo "subdomain=${REPO_NAME_LOW}" >> $GITHUB_OUTPUT
+
+      - name: Deploy to Vercel
+        id: vercel_deploy
+        run: |
+          PARAM="--token=${{ env.VERCEL_TOKEN }} --yes"
+          [[ "${{ github.ref }}" == "refs/heads/main" ]] && PARAM="$PARAM --prod"
+          DEPLOY_URL=$(npx vercel deploy $PARAM)
+          echo "url=$DEPLOY_URL" >> $GITHUB_OUTPUT
+
+      - name: Configure Cloudflare DNS
+        if: github.ref == 'refs/heads/main'
+        env:
+          CF_TOKEN: ${{ env.CLOUDFLARE_API_TOKEN }}
+          ZONE_ID: ${{ env.CLOUDFLARE_ZONE_ID }}
+        run: |
+          DOMAIN_NAME="${{ steps.meta.outputs.full_domain }}"
+           
+          # Get Record ID
+          RECORD_ID=$(curl -s -X GET "https://api.cloudflare.com/client/v4/zones/$ZONE_ID/dns_records?name=$DOMAIN_NAME" \
+            -H "Authorization: Bearer $CF_TOKEN" | jq -r '.result[0].id // empty')
+
+          DNS_PAYLOAD=$(jq -n --arg name "${{ steps.meta.outputs.subdomain }}" --arg content "${{ env.VERCEL_CNAME }}" \
+            '{type:"CNAME", name:$name, content:$content, ttl:1, proxied:false}')
+
+          if [ -z "$RECORD_ID" ]; then
+            METHOD="POST"
+            URL="https://api.cloudflare.com/client/v4/zones/$ZONE_ID/dns_records"
+          else
+            METHOD="PUT"
+            URL="https://api.cloudflare.com/client/v4/zones/$ZONE_ID/dns_records/$RECORD_ID"
+          fi
+
+          curl -X $METHOD "$URL" -H "Authorization: Bearer $CF_TOKEN" \
+            -H "Content-Type: application/json" -d "$DNS_PAYLOAD"
+
+      - name: Sync Vercel Settings
+        run: |
+          V_CMD="npx vercel --token=${{ env.VERCEL_TOKEN }}"
+          $V_CMD domains add ${{ steps.meta.outputs.full_domain }} --force || true
+           
+          declare -A ENVS=( 
+            ["NAME_SERVICE"]="${{ github.repository }}" 
+            ["VAULT_ADDR"]="${{ secrets.VAULT_ADDR }}" 
+            ["VAULT_ROLE_ID"]="${{ secrets.VAULT_ROLE_ID_PROD }}" 
+            ["VAULT_SECRET_ID"]="${{ secrets.VAULT_SECRET_ID_PROD }}" 
+            ["VAULT_DATA_PATH"]="${{ secrets.VAULT_DATA_PATH_PROD }}"
+          )
+           
+          for key in "${!ENVS[@]}"; do
+            printf "${ENVS[$key]}" | $V_CMD env add $key production --force || true
+          done
+
+      - name: Notify Telegram
+        if: always()
+        run: |
+          STATUS="${{ job.status == 'success' && '✅' || '❌' }}"
+          REPO="${{ github.repository }}"
+           
+          MESSAGE="<b>${STATUS} Deployment ${{ job.status }}</b>%0A%0A"
+          MESSAGE+="📦 <b>Repo:</b> <code>${REPO}</code>%0A"
+          MESSAGE+="🌿 <b>Branch:</b> ${{ github.ref_name }}%0A"
+
+          # Chỉ hiển thị Domain nếu step Generate Domain Metadata chạy thành công
+          if [ ! -z "${{ steps.meta.outputs.full_domain }}" ]; then
+             MESSAGE+="🌐 <b>Domain:</b> <a href='https://${{ steps.meta.outputs.full_domain }}'>${{ steps.meta.outputs.full_domain }}</a>%0A"
+          fi
+
+          MESSAGE+="📊 <b>Coverage:</b> <a href='https://app.codecov.io/gh/${REPO}/commit/${{ github.sha }}'>Details</a>%0A"
+          MESSAGE+="🛠 <b>Action:</b> <a href='${{ github.server_url }}/${REPO}/actions/runs/${{ github.run_id }}'>View Run</a>%0A%0A"
+          MESSAGE+="📝 <b>Commit:</b> $(echo '${{ github.event.head_commit.message }}' | head -n 1)"
+
+          curl -s -X POST "https://api.telegram.org/bot${{ env.TELEGRAM_BOT_TOKEN }}/sendMessage" \
+            -d "chat_id=${{ env.TELEGRAM_CHAT_ID }}&parse_mode=HTML&disable_web_page_preview=true&text=$MESSAGE"
