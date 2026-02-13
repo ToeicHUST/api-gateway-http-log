@@ -1,0 +1,159 @@
+name: Deploy NestJS to Vercel + Cloudflare DNS
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  install-deps:
+    runs-on: ubuntu-latest
+    outputs:
+      deps-cache-key: ${{ steps.cache-key.outputs.CACHE_KEY }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Calculate cache key
+        id: cache-key
+        run: |
+          echo "CACHE_KEY=deps-node-modules-${{ hashFiles('package-lock.json') }}" >> "$GITHUB_OUTPUT"
+      - name: Download cached dependencies
+        uses: actions/cache@v3
+        id: cache
+        with:
+          path: node_modules
+          key: ${{ steps.cache-key.outputs.CACHE_KEY }}
+      - name: Install dependencies
+        if: steps.cache.outputs.cache-hit != 'true'
+        run: npm ci
+
+  unit-test:
+    runs-on: ubuntu-latest
+    needs: install-deps
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Download cached dependencies
+        uses: actions/cache@v3
+        id: cache
+        with:
+          path: node_modules
+          key: ${{ needs.install-deps.outputs.deps-cache-key }}
+
+      - name: Test Coverage
+        run: npm run test:cov
+
+      - name: Upload to Codecov
+        uses: codecov/codecov-action@v5
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          directory: ./coverage
+          fail_ci_if_error: true
+
+  e2e-test:
+    runs-on: ubuntu-latest
+    needs: install-deps
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Download cached dependencies
+        uses: actions/cache@v3
+        id: cache
+        with:
+          path: node_modules
+          key: ${{ needs.install-deps.outputs.deps-cache-key }}
+
+      - name: Test E2E
+        run: npm run test:e2e
+
+  build:
+    runs-on: ubuntu-latest
+    needs: install-deps
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Download cached dependencies
+        uses: actions/cache@v3
+        id: cache
+        with:
+          path: node_modules
+          key: ${{ needs.install-deps.outputs.deps-cache-key }}
+
+      - name: Build Project
+        run: npm run build --if-present
+
+  deploy:
+    if: github.ref == 'refs/heads/main'
+    needs: [install-deps, unit-test, e2e-test, build]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Download cached dependencies
+        uses: actions/cache@v3
+        id: cache
+        with:
+          path: node_modules
+          key: ${{ needs.install-deps.outputs.deps-cache-key }}
+
+      - name: Generate Domain Metadata
+        id: meta
+        run: |
+          REPO_NAME_LOW=$(echo "${{ github.event.repository.name }}" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9-]/-/g')
+          echo "full_domain=${REPO_NAME_LOW}.${{ secrets.DOMAIN }}" >> $GITHUB_OUTPUT
+          echo "subdomain=${REPO_NAME_LOW}" >> $GITHUB_OUTPUT
+
+      - name: Deploy to Vercel
+        id: vercel_deploy
+        run: |
+          PARAM="--token=${{ secrets.VERCEL_TOKEN }} --yes"
+          [[ "${{ github.ref }}" == "refs/heads/main" ]] && PARAM="$PARAM --prod"
+          DEPLOY_URL=$(npx vercel deploy $PARAM)
+          echo "url=$DEPLOY_URL" >> $GITHUB_OUTPUT
+
+      - name: Configure Cloudflare DNS
+        env:
+          CF_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          ZONE_ID: ${{ secrets.CLOUDFLARE_ZONE_ID }}
+        run: |
+          DOMAIN_NAME="${{ steps.meta.outputs.full_domain }}"
+
+          # Get Record ID
+          RECORD_ID=$(curl -s -X GET "https://api.cloudflare.com/client/v4/zones/$ZONE_ID/dns_records?name=$DOMAIN_NAME" \
+            -H "Authorization: Bearer $CF_TOKEN" | jq -r '.result[0].id // empty')
+
+          DNS_PAYLOAD=$(jq -n --arg name "${{ steps.meta.outputs.subdomain }}" --arg content "${{ secrets.VERCEL_CNAME }}" \
+            '{type:"CNAME", name:$name, content:$content, ttl:1, proxied:false}')
+
+          if [ -z "$RECORD_ID" ]; then
+            METHOD="POST"
+            URL="https://api.cloudflare.com/client/v4/zones/$ZONE_ID/dns_records"
+          else
+            METHOD="PUT"
+            URL="https://api.cloudflare.com/client/v4/zones/$ZONE_ID/dns_records/$RECORD_ID"
+          fi
+
+          echo "Updating DNS Record for $DOMAIN_NAME..."
+          curl -X $METHOD "$URL" -H "Authorization: Bearer $CF_TOKEN" \
+            -H "Content-Type: application/json" -d "$DNS_PAYLOAD"
