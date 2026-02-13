@@ -1,0 +1,15 @@
+comment:
+  layout: "reach, diff, flags, files"
+  behavior: default  # Cập nhật comment cũ thay vì tạo comment mới mỗi lần push
+  require_changes: false  # Luôn hiển thị comment ngay cả khi coverage không đổi
+
+coverage:
+  status:
+    project:
+      default:
+        target: auto  # So sánh với nhánh base
+        threshold: 1% # Cho phép giảm tối đa 1% mà không đánh dấu "fail" build
+    patch:
+      default:
+        target: auto
+        threshold: 0% # Các dòng code mới thêm vào phải được test
