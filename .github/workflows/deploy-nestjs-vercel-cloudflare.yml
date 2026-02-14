@@ -160,3 +160,24 @@ jobs:
           echo "Updating DNS Record for $DOMAIN_NAME..."
           curl -X $METHOD "$URL" -H "Authorization: Bearer $CF_TOKEN" \
             -H "Content-Type: application/json" -d "$DNS_PAYLOAD"
+
+      - name: Sync Vercel Settings
+        env:
+          ALL_SECRETS: ${{ toJson(secrets) }}
+        run: |
+          V_CMD="npx vercel --token=${{ secrets.VERCEL_TOKEN }}"
+          $V_CMD domains add ${{ steps.meta.outputs.full_domain }} --force || true
+           
+          declare -A ENVS=( 
+            ["NAME_SERVICE"]="${{ github.repository }}" 
+          )
+
+          for key in "${!ENVS[@]}"; do
+            printf "%s" "${ENVS[$key]}" | $V_CMD env add "$key" production --force || true
+          done
+
+          echo "$ALL_SECRETS" | jq -r 'to_entries[] | .key + " " + .value' | while read -r key value; do
+            if [ "$key" != "VERCEL_TOKEN" ]; then
+              printf "%s" "$value" | $V_CMD env add "$key" production --force || true
+            fi
+          done
