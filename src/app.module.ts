@@ -28,10 +28,11 @@ import { ApiLogsModule } from './modules/api-logs/api-logs.module';
             configService.get<string>('NODE_ENV') === 'development'
               ? true
               : false,
-          synchronize:
-            configService.get<string>('NODE_ENV') === 'production'
-              ? false
-              : true,
+          // synchronize:
+          //   configService.get<string>('NODE_ENV') === 'production'
+          //     ? false
+          //     : true,
+          synchronize: true,
 
           ssl: configService.get<string>('NODE_ENV') === 'test' ? false : true,
           extra: {
