@@ -120,12 +120,46 @@ jobs:
           path: node_modules
           key: ${{ needs.install-deps.outputs.deps-cache-key }}
 
-      - name: Generate Domain Metadata
+      - name: Generate Metadata
         id: meta
         run: |
           REPO_NAME_LOW=$(echo "${{ github.event.repository.name }}" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9-]/-/g')
+          echo "name=$REPO_NAME_LOW" >> $GITHUB_OUTPUT
           echo "full_domain=${REPO_NAME_LOW}.${{ secrets.DOMAIN }}" >> $GITHUB_OUTPUT
           echo "subdomain=${REPO_NAME_LOW}" >> $GITHUB_OUTPUT
+
+      - name: Initialize Vercel Project
+        run: |
+          PROJECT_NAME="${{ steps.meta.outputs.name }}"
+          echo "Checking/Creating project: $PROJECT_NAME..."
+          npx vercel project add "$PROJECT_NAME" --token=${{ secrets.VERCEL_TOKEN }} --yes || true
+          echo "Linking project..."
+          npx vercel pull --yes --environment=production --token=${{ secrets.VERCEL_TOKEN }}
+
+      - name: Sync Vercel Settings
+        env:
+          ALL_SECRETS: ${{ toJson(secrets) }}
+        run: |
+          V_CMD="npx vercel --token=${{ secrets.VERCEL_TOKEN }}"
+
+          $V_CMD pull --yes --environment=production 
+
+          # Add Domain
+          $V_CMD domains add ${{ steps.meta.outputs.full_domain }} --force || true
+            
+          declare -A ENVS=( 
+            ["NAME_SERVICE"]="${{ github.event.repository.name }}" 
+          )
+
+          for key in "${!ENVS[@]}"; do
+            printf "%s" "${ENVS[$key]}" | $V_CMD env add "$key" production --force || true
+          done
+
+          echo "$ALL_SECRETS" | jq -r 'to_entries[] | .key + " " + .value' | while read -r key value; do
+            if [ "$key" != "VERCEL_TOKEN" ]; then
+              printf "%s" "$value" | $V_CMD env add "$key" production --force || true
+            fi
+          done
 
       - name: Deploy to Vercel
         id: vercel_deploy
@@ -142,7 +176,6 @@ jobs:
         run: |
           DOMAIN_NAME="${{ steps.meta.outputs.full_domain }}"
 
-          # Get Record ID
           RECORD_ID=$(curl -s -X GET "https://api.cloudflare.com/client/v4/zones/$ZONE_ID/dns_records?name=$DOMAIN_NAME" \
             -H "Authorization: Bearer $CF_TOKEN" | jq -r '.result[0].id // empty')
 
@@ -160,24 +193,3 @@ jobs:
           echo "Updating DNS Record for $DOMAIN_NAME..."
           curl -X $METHOD "$URL" -H "Authorization: Bearer $CF_TOKEN" \
             -H "Content-Type: application/json" -d "$DNS_PAYLOAD"
-
-      - name: Sync Vercel Settings
-        env:
-          ALL_SECRETS: ${{ toJson(secrets) }}
-        run: |
-          V_CMD="npx vercel --token=${{ secrets.VERCEL_TOKEN }}"
-          $V_CMD domains add ${{ steps.meta.outputs.full_domain }} --force || true
-           
-          declare -A ENVS=( 
-            ["NAME_SERVICE"]="${{ github.repository }}" 
-          )
-
-          for key in "${!ENVS[@]}"; do
-            printf "%s" "${ENVS[$key]}" | $V_CMD env add "$key" production --force || true
-          done
-
-          echo "$ALL_SECRETS" | jq -r 'to_entries[] | .key + " " + .value' | while read -r key value; do
-            if [ "$key" != "VERCEL_TOKEN" ]; then
-              printf "%s" "$value" | $V_CMD env add "$key" production --force || true
-            fi
-          done
